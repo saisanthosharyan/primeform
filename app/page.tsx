@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import MachineStatus from "./components/MachineStatus";
 
 type Stage =
   | "checks"
@@ -396,6 +397,10 @@ export default function Home() {
           </div>
         </div>
       )}
+      {/* MACHINE STATUS */}
+      <div className="mx-auto max-w-4xl px-5 pt-6">
+        <MachineStatus status={setup.operationStatus} />
+      </div>
 
       {/* MAIN */}
       <section className="mx-auto flex min-h-[calc(100vh-150px)] max-w-4xl items-center px-5 py-10">
