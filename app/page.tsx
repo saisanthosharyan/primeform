@@ -1,7 +1,22 @@
-"use client";
+﻿"use client";
 
-import { useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+
+import Header from "./components/Header";
 import MachineStatus from "./components/MachineStatus";
+import ProgressBar from "./components/ProgressBar";
+import MachineChecks from "./components/MachineChecks";
+import ToolSetup from "./components/ToolSetup";
+import OperationPanel from "./components/OperationPanel";
+
+// -----------------------------------------------------
+// TYPES
+// -----------------------------------------------------
 
 type Stage =
   | "checks"
@@ -10,7 +25,10 @@ type Stage =
   | "ready"
   | "operation";
 
-type OperationStatus = "READY" | "RUNNING" | "STOPPED";
+type OperationStatus =
+  | "READY"
+  | "RUNNING"
+  | "STOPPED";
 
 type SetupState = {
   machineChecks: boolean[];
@@ -18,112 +36,155 @@ type SetupState = {
   workpieceConfirmed: boolean;
   stage: Stage;
   operationStatus: OperationStatus;
+  operationProgress: number;
+  operationElapsedSeconds: number;
 };
+
+type ApiResponse = {
+  success: boolean;
+  message?: string;
+  data?: SetupState;
+};
+
+// -----------------------------------------------------
+// MACHINE CHECKS
+// -----------------------------------------------------
 
 const machineChecks = [
   {
-    title: "Power / Control Available",
+    title: "Emergency Stop",
     description:
-      "Confirm that machine power and CNC control are available.",
+      "Verify that the emergency stop circuit is released and available.",
   },
   {
-    title: "E-Stop Released",
+    title: "Machine Power",
     description:
-      "Confirm that the emergency stop button is released and the machine can operate.",
+      "Verify that the main machine power is available.",
   },
   {
-    title: "Guard / Door Closed",
+    title: "Coolant System",
     description:
-      "Confirm that all machine guards and doors are securely closed.",
+      "Verify that the coolant system is available and ready for operation.",
   },
   {
-    title: "No Active Alarm",
+    title: "Lubrication",
     description:
-      "Confirm that the CNC control shows no active machine alarms.",
+      "Verify that the machine lubrication system is ready.",
   },
   {
-    title: "Lubrication / Coolant Ready",
+    title: "Safety Doors",
     description:
-      "Confirm that lubrication and coolant systems are ready for operation.",
+      "Verify that all machine safety doors are closed and interlocks are ready.",
   },
   {
-    title: "Reference Return Complete",
+    title: "Control System",
     description:
-      "Confirm that the machine has completed reference return.",
+      "Verify that the CNC control system is powered and ready.",
   },
 ];
+
+// -----------------------------------------------------
+// TOOLS
+// -----------------------------------------------------
 
 const tools = [
   {
-    number: "T01",
-    type: "Ø16 mm Carbide End Mill",
-    purpose: "Roughing",
+    title: "Roughing End Mill",
+    description:
+      "Verify that the roughing end mill is correctly installed and secured.",
   },
   {
-    number: "T02",
-    type: "Ø8 mm Carbide End Mill",
-    purpose: "Finishing",
+    title: "Finishing End Mill",
+    description:
+      "Verify that the finishing end mill is correctly installed and secured.",
   },
   {
-    number: "T03",
-    type: "Ø6 mm Drill",
-    purpose: "Drilling",
+    title: "Drill",
+    description:
+      "Verify that the drill is correctly installed and secured.",
   },
   {
-    number: "T04",
-    type: "Ø10 mm Chamfer Mill",
-    purpose: "Chamfering",
+    title: "Probe",
+    description:
+      "Verify that the probing tool is correctly installed and ready.",
   },
 ];
 
-const workpiece = {
-  name: "Aluminum Housing",
-  material: "AL 6061-T6",
-  drawing: "DWG-2048",
-  revision: "Rev C",
-  fixture: "4-jaw hydraulic fixture",
-  orientation: "Datum A facing operator",
-  clamping:
-    "Engage all four jaws and verify secure seating before proceeding.",
-  workOffset: "G54",
-};
+// -----------------------------------------------------
+// DEFAULT SETUP
+// -----------------------------------------------------
 
-const initialState: SetupState = {
-  machineChecks: new Array(machineChecks.length).fill(false),
-  tools: new Array(tools.length).fill(false),
+const defaultSetup: SetupState = {
+  machineChecks: machineChecks.map(() => false),
+  tools: tools.map(() => false),
   workpieceConfirmed: false,
   stage: "checks",
   operationStatus: "READY",
+  operationProgress: 0,
+  operationElapsedSeconds: 0,
 };
 
+// -----------------------------------------------------
+// MAIN COMPONENT
+// -----------------------------------------------------
+
 export default function Home() {
-  const [setup, setSetup] = useState<SetupState>(initialState);
+  // ---------------------------------------------------
+  // STATE
+  // ---------------------------------------------------
 
-  const [currentCheck, setCurrentCheck] = useState(0);
-  const [currentTool, setCurrentTool] = useState(0);
+  const [setup, setSetup] =
+    useState<SetupState>(defaultSetup);
 
-  const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [currentCheck, setCurrentCheck] =
+    useState(0);
 
-  const currentCheckItem = machineChecks[currentCheck];
-  const currentToolItem = tools[currentTool];
+  const [currentTool, setCurrentTool] =
+    useState(0);
 
-  const checkConfirmed =
-    setup.machineChecks[currentCheck] ?? false;
+  const [loading, setLoading] =
+    useState(true);
 
-  const toolConfirmed =
-    setup.tools[currentTool] ?? false;
+  const [actionLoading, setActionLoading] =
+    useState(false);
 
-  const allChecksConfirmed =
-    setup.machineChecks.every(Boolean);
+  const [error, setError] =
+    useState("");
 
-  const allToolsConfirmed =
-    setup.tools.every(Boolean);
+  // ---------------------------------------------------
+  // REFS
+  // ---------------------------------------------------
 
-  async function loadSetup() {
+  const setupRef =
+    useRef<SetupState>(defaultSetup);
+
+  const operationTimerRef =
+    useRef<ReturnType<typeof setInterval> | null>(
+      null
+    );
+
+  const progressSaveRef =
+    useRef<ReturnType<typeof setInterval> | null>(
+      null
+    );
+
+  const completionSavedRef =
+    useRef(false);
+
+  // ---------------------------------------------------
+  // KEEP REF IN SYNC
+  // ---------------------------------------------------
+
+  useEffect(() => {
+    setupRef.current = setup;
+  }, [setup]);
+
+  // ---------------------------------------------------
+  // LOAD SETUP
+  // ---------------------------------------------------
+
+  const loadSetup = useCallback(async () => {
     try {
-      setLoading(true);
       setError("");
 
       const response = await fetch("/api/setup", {
@@ -131,935 +192,1190 @@ export default function Home() {
         cache: "no-store",
       });
 
-      const result = await response.json();
-
-      if (!response.ok || !result.success) {
+      if (!response.ok) {
         throw new Error(
-          result.message || "Unable to load setup state."
+          "Failed to load machine setup"
         );
       }
 
-      setSetup(result.data);
+      const result =
+        (await response.json()) as ApiResponse;
 
-      if (result.data.stage === "checks") {
+      if (!result.success || !result.data) {
+        throw new Error(
+          result.message ||
+            "Failed to load machine setup"
+        );
+      }
+
+      const data = result.data;
+
+      setSetup(data);
+      setupRef.current = data;
+
+      // Find first incomplete machine check
+      if (data.stage === "checks") {
         const firstIncomplete =
-          result.data.machineChecks.findIndex(
-            (value: boolean) => !value
+          data.machineChecks.findIndex(
+            (value) => !value
           );
 
         setCurrentCheck(
-          firstIncomplete === -1 ? 0 : firstIncomplete
+          firstIncomplete === -1
+            ? 0
+            : firstIncomplete
         );
       }
 
-      if (result.data.stage === "tools") {
+      // Find first incomplete tool
+      if (data.stage === "tools") {
         const firstIncomplete =
-          result.data.tools.findIndex(
-            (value: boolean) => !value
+          data.tools.findIndex(
+            (value) => !value
           );
 
         setCurrentTool(
-          firstIncomplete === -1 ? 0 : firstIncomplete
+          firstIncomplete === -1
+            ? 0
+            : firstIncomplete
         );
       }
     } catch (err) {
       setError(
         err instanceof Error
           ? err.message
-          : "Unable to connect to the setup API."
+          : "Unable to load machine setup"
       );
-    } finally {
-      setLoading(false);
     }
-  }
-
-  async function performAction(
-    action: string,
-    index?: number
-  ) {
-    try {
-      setActionLoading(true);
-      setError("");
-
-      const response = await fetch("/api/setup", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(
-          index === undefined
-            ? { action }
-            : { action, index }
-        ),
-      });
-
-      const result = await response.json();
-
-      if (!response.ok || !result.success) {
-        throw new Error(
-          result.message || "Action could not be completed."
-        );
-      }
-
-      setSetup(result.data);
-
-      return result.data as SetupState;
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Something went wrong."
-      );
-
-      return null;
-    } finally {
-      setActionLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    loadSetup();
   }, []);
 
-  async function confirmCheck() {
-    await performAction("confirm-check", currentCheck);
-  }
+  // ---------------------------------------------------
+  // INITIALIZE
+  // ---------------------------------------------------
 
-  async function nextCheck() {
-    if (!checkConfirmed || actionLoading) return;
+  useEffect(() => {
+    let mounted = true;
 
-    if (currentCheck < machineChecks.length - 1) {
-      setCurrentCheck((previous) => previous + 1);
+    async function initialize() {
+      setLoading(true);
+
+      await loadSetup();
+
+      if (mounted) {
+        setLoading(false);
+      }
+    }
+
+    initialize();
+
+    return () => {
+      mounted = false;
+    };
+  }, [loadSetup]);
+
+  // ---------------------------------------------------
+  // COMMON API ACTION
+  // ---------------------------------------------------
+
+  const performAction = useCallback(
+    async (
+      action: string,
+      index?: number,
+      extraData?: Record<string, unknown>
+    ): Promise<SetupState | null> => {
+      try {
+        setActionLoading(true);
+        setError("");
+
+        const body: Record<string, unknown> = {
+          action,
+          ...extraData,
+        };
+
+        if (typeof index === "number") {
+          body.index = index;
+        }
+
+        const response = await fetch(
+          "/api/setup",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify(body),
+          }
+        );
+
+        const result =
+          (await response.json()) as ApiResponse;
+
+        if (
+          !response.ok ||
+          !result.success ||
+          !result.data
+        ) {
+          throw new Error(
+            result.message || "Action failed"
+          );
+        }
+
+        const data = result.data;
+
+        setSetup(data);
+        setupRef.current = data;
+
+        return data;
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Action failed"
+        );
+
+        return null;
+      } finally {
+        setActionLoading(false);
+      }
+    },
+    []
+  );
+
+  // ---------------------------------------------------
+  // MACHINE CHECK HANDLERS
+  // ---------------------------------------------------
+
+  const confirmCheck = async () => {
+    if (actionLoading) {
       return;
     }
 
-    const updated = await performAction(
+    if (setup.machineChecks[currentCheck]) {
+      return;
+    }
+
+    await performAction(
       "confirm-check",
       currentCheck
     );
+  };
 
-    if (updated?.stage === "tools") {
-      setCurrentTool(0);
-    }
-  }
-
-  async function confirmTool() {
-    await performAction("confirm-tool", currentTool);
-  }
-
-  async function nextTool() {
-    if (!toolConfirmed || actionLoading) return;
-
-    if (currentTool < tools.length - 1) {
-      setCurrentTool((previous) => previous + 1);
+  const nextCheck = () => {
+    if (actionLoading) {
       return;
     }
 
-    const updated = await performAction(
+    if (!setup.machineChecks[currentCheck]) {
+      return;
+    }
+
+    if (
+      currentCheck <
+      machineChecks.length - 1
+    ) {
+      setCurrentCheck(
+        (previous) => previous + 1
+      );
+    }
+  };
+
+  // ---------------------------------------------------
+  // TOOL HANDLERS
+  // ---------------------------------------------------
+
+  const confirmTool = async () => {
+    if (actionLoading) {
+      return;
+    }
+
+    if (setup.tools[currentTool]) {
+      return;
+    }
+
+    await performAction(
       "confirm-tool",
       currentTool
     );
+  };
 
-    if (updated?.stage === "workpiece") {
-      // Workpiece stage is now active.
+  const nextTool = () => {
+    if (actionLoading) {
+      return;
     }
-  }
 
-  async function confirmWorkpiece() {
-    await performAction("confirm-workpiece");
-  }
+    if (!setup.tools[currentTool]) {
+      return;
+    }
 
-  async function proceedToOperation() {
-    await performAction("proceed-operation");
-  }
+    if (
+      currentTool <
+      tools.length - 1
+    ) {
+      setCurrentTool(
+        (previous) => previous + 1
+      );
+    }
+  };
 
-  async function startOperation() {
-    await performAction("start-operation");
-  }
+  // ---------------------------------------------------
+  // WORKPIECE HANDLER
+  // ---------------------------------------------------
 
-  async function stopOperation() {
-    await performAction("stop-operation");
-  }
+  const confirmWorkpiece = async () => {
+    if (actionLoading) {
+      return;
+    }
+
+    if (setup.workpieceConfirmed) {
+      return;
+    }
+
+    await performAction(
+      "confirm-workpiece"
+    );
+  };
+
+  // ---------------------------------------------------
+  // OPERATION HANDLERS
+  // ---------------------------------------------------
+
+  const proceedOperation = async () => {
+    if (actionLoading) {
+      return;
+    }
+
+    await performAction(
+      "proceed-operation"
+    );
+  };
+
+  const startOperation = async () => {
+    if (actionLoading) {
+      return;
+    }
+
+    if (
+      setup.stage !== "operation" ||
+      setup.operationProgress >= 100
+    ) {
+      return;
+    }
+
+    completionSavedRef.current = false;
+
+    await performAction(
+      "start-operation"
+    );
+  };
+
+  const stopOperation = async () => {
+    if (actionLoading) {
+      return;
+    }
+
+    if (setup.stage !== "operation") {
+      return;
+    }
+
+    const current = setupRef.current;
+
+    await performAction(
+      "stop-operation",
+      undefined,
+      {
+        progress:
+          current.operationProgress,
+        elapsedSeconds:
+          current.operationElapsedSeconds,
+      }
+    );
+  };
+
+  // ---------------------------------------------------
+  // RESET
+  // ---------------------------------------------------
+
+  const resetSetup = async () => {
+    if (actionLoading) {
+      return;
+    }
+
+    const result =
+      await performAction("reset");
+
+    if (result) {
+      setCurrentCheck(0);
+      setCurrentTool(0);
+
+      completionSavedRef.current =
+        false;
+    }
+  };
+
+  // ---------------------------------------------------
+  // OPERATION TIMER
+  // ---------------------------------------------------
+
+  useEffect(() => {
+    const shouldRun =
+      setup.stage === "operation" &&
+      setup.operationStatus === "RUNNING";
+
+    // Stop timers when operation is not running
+    if (!shouldRun) {
+      if (operationTimerRef.current) {
+        clearInterval(
+          operationTimerRef.current
+        );
+
+        operationTimerRef.current = null;
+      }
+
+      if (progressSaveRef.current) {
+        clearInterval(
+          progressSaveRef.current
+        );
+
+        progressSaveRef.current = null;
+      }
+
+      return;
+    }
+
+    // -----------------------------------------------
+    // LOCAL TIMER
+    // -----------------------------------------------
+
+    if (!operationTimerRef.current) {
+      operationTimerRef.current =
+        setInterval(() => {
+          setSetup((previous) => {
+            if (
+              previous.stage !==
+                "operation" ||
+              previous.operationStatus !==
+                "RUNNING"
+            ) {
+              return previous;
+            }
+
+            const nextElapsed =
+              previous.operationElapsedSeconds +
+              1;
+
+            const nextProgress = Math.min(
+              100,
+              Math.floor(
+                (nextElapsed / 300) * 100
+              )
+            );
+
+            const nextState: SetupState = {
+              ...previous,
+              operationProgress:
+                nextProgress,
+              operationElapsedSeconds:
+                nextElapsed,
+              operationStatus:
+                nextProgress >= 100
+                  ? "STOPPED"
+                  : "RUNNING",
+            };
+
+            setupRef.current =
+              nextState;
+
+            return nextState;
+          });
+        }, 1000);
+    }
+
+    // -----------------------------------------------
+    // SAVE PROGRESS EVERY 5 SECONDS
+    // -----------------------------------------------
+
+    if (!progressSaveRef.current) {
+      progressSaveRef.current =
+        setInterval(async () => {
+          const current =
+            setupRef.current;
+
+          if (
+            current.stage !==
+              "operation" ||
+            current.operationStatus !==
+              "RUNNING"
+          ) {
+            return;
+          }
+
+          try {
+            const response =
+              await fetch("/api/setup", {
+                method: "POST",
+                headers: {
+                  "Content-Type":
+                    "application/json",
+                },
+                body: JSON.stringify({
+                  action:
+                    "update-operation",
+                  progress:
+                    current.operationProgress,
+                  elapsedSeconds:
+                    current.operationElapsedSeconds,
+                }),
+              });
+
+            if (!response.ok) {
+              return;
+            }
+
+            const result =
+              (await response.json()) as ApiResponse;
+
+            if (
+              !result.success ||
+              !result.data
+            ) {
+              return;
+            }
+
+            const serverState =
+              result.data;
+
+            setSetup((previous) => {
+              // Prevent stale server data
+              // from moving the timer backwards.
+              if (
+                serverState.operationElapsedSeconds <
+                previous.operationElapsedSeconds
+              ) {
+                return previous;
+              }
+
+              setupRef.current =
+                serverState;
+
+              return serverState;
+            });
+          } catch {
+            // Keep local operation running
+            // if saving fails.
+          }
+        }, 5000);
+    }
+
+    // -----------------------------------------------
+    // CLEANUP
+    // -----------------------------------------------
+
+    return () => {
+      if (operationTimerRef.current) {
+        clearInterval(
+          operationTimerRef.current
+        );
+
+        operationTimerRef.current = null;
+      }
+
+      if (progressSaveRef.current) {
+        clearInterval(
+          progressSaveRef.current
+        );
+
+        progressSaveRef.current = null;
+      }
+    };
+  }, [
+    setup.stage,
+    setup.operationStatus,
+  ]);
+
+  // ---------------------------------------------------
+  // SAVE COMPLETED OPERATION
+  // ---------------------------------------------------
+
+  useEffect(() => {
+    if (
+      setup.stage !== "operation" ||
+      setup.operationProgress < 100 ||
+      setup.operationStatus !==
+        "STOPPED"
+    ) {
+      return;
+    }
+
+    if (completionSavedRef.current) {
+      return;
+    }
+
+    completionSavedRef.current = true;
+
+    let cancelled = false;
+
+    async function saveCompletedOperation() {
+      try {
+        const response =
+          await fetch("/api/setup", {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              action:
+                "update-operation",
+              progress: 100,
+              elapsedSeconds:
+                setup.operationElapsedSeconds,
+            }),
+          });
+
+        if (!response.ok) {
+          completionSavedRef.current =
+            false;
+
+          return;
+        }
+
+        const result =
+          (await response.json()) as ApiResponse;
+
+        if (
+          !cancelled &&
+          result.success &&
+          result.data
+        ) {
+          setSetup(result.data);
+
+          setupRef.current =
+            result.data;
+        }
+      } catch {
+        completionSavedRef.current =
+          false;
+      }
+    }
+
+    saveCompletedOperation();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    setup.stage,
+    setup.operationProgress,
+    setup.operationStatus,
+    setup.operationElapsedSeconds,
+  ]);
+
+  // ---------------------------------------------------
+  // BACKEND POLLING
+  // ---------------------------------------------------
+
+  useEffect(() => {
+    if (
+      setup.stage !== "operation" ||
+      setup.operationStatus !==
+        "RUNNING"
+    ) {
+      return;
+    }
+
+    const interval =
+      setInterval(async () => {
+        try {
+          const response =
+            await fetch("/api/setup", {
+              method: "GET",
+              cache: "no-store",
+            });
+
+          if (!response.ok) {
+            return;
+          }
+
+          const result =
+            (await response.json()) as ApiResponse;
+
+          if (
+            !result.success ||
+            !result.data
+          ) {
+            return;
+          }
+
+          const serverState =
+            result.data;
+
+          setSetup((previous) => {
+            // Don't allow stale server
+            // response to move timer backwards.
+            if (
+              serverState.operationElapsedSeconds <
+              previous.operationElapsedSeconds
+            ) {
+              return previous;
+            }
+
+            setupRef.current =
+              serverState;
+
+            return serverState;
+          });
+        } catch {
+          // Ignore temporary
+          // polling failures.
+        }
+      }, 10000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [
+    setup.stage,
+    setup.operationStatus,
+  ]);
+
+  // ---------------------------------------------------
+  // CALCULATE PROGRESS
+  // ---------------------------------------------------
+
+  const checkConfirmed =
+    setup.machineChecks[
+      currentCheck
+    ] ?? false;
+
+  const toolConfirmed =
+    setup.tools[currentTool] ?? false;
+
+  const checksCompleted =
+    setup.machineChecks.filter(
+      Boolean
+    ).length;
+
+  const toolsCompleted =
+    setup.tools.filter(Boolean).length;
+
+  const progress =
+    setup.stage === "checks"
+      ? (checksCompleted /
+          machineChecks.length) *
+        20
+      : setup.stage === "tools"
+      ? 20 +
+        (toolsCompleted /
+          tools.length) *
+          20
+      : setup.stage ===
+        "workpiece"
+      ? 60
+      : setup.stage === "ready"
+      ? 80
+      : 100;
+
+  // ---------------------------------------------------
+  // STAGE TITLE
+  // ---------------------------------------------------
+
+  const stageTitle =
+    setup.stage === "checks"
+      ? "Machine Checks"
+      : setup.stage === "tools"
+      ? "Tool Setup"
+      : setup.stage === "workpiece"
+      ? "Workpiece Setup"
+      : setup.stage === "ready"
+      ? "Ready Review"
+      : "Operation";
+
+  // ---------------------------------------------------
+  // STAGE SUBTITLE
+  // ---------------------------------------------------
+
+  const stageSubtitle =
+    setup.stage === "checks"
+      ? `${Math.min(
+          currentCheck + 1,
+          machineChecks.length
+        )} of ${
+          machineChecks.length
+        }`
+      : setup.stage === "tools"
+      ? `${Math.min(
+          currentTool + 1,
+          tools.length
+        )} of ${tools.length}`
+      : setup.stage ===
+        "workpiece"
+      ? "Complete"
+      : setup.stage === "ready"
+      ? "Final Review"
+      : setup.operationStatus;
+
+  // ---------------------------------------------------
+  // LOADING SCREEN
+  // ---------------------------------------------------
 
   if (loading) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-100">
-        <div className="rounded-2xl bg-white p-8 text-center shadow-sm">
-          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-t-blue-600" />
+      <main className="min-h-screen bg-slate-100">
+        <Header
+          operationStatus={
+            setup.operationStatus
+          }
+        />
 
-          <p className="mt-4 font-semibold text-slate-700">
-            Loading VMC setup...
-          </p>
+        <div className="flex min-h-[70vh] items-center justify-center px-4">
+          <div className="rounded-2xl bg-white px-8 py-7 shadow-sm">
+            <p className="font-semibold text-slate-700">
+              Loading machine setup...
+            </p>
+          </div>
         </div>
       </main>
     );
   }
 
+  // ---------------------------------------------------
+  // MAIN UI
+  // ---------------------------------------------------
+
   return (
-    <main className="min-h-screen bg-slate-100 text-slate-900">
-      {/* HEADER */}
-      <header className="border-b border-slate-300 bg-slate-900 text-white">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-4">
-          <div>
-            <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-400">
-              VMC Operator HMI
-            </p>
+    <main className="min-h-screen bg-slate-100">
+      <Header
+        operationStatus={
+          setup.operationStatus
+        }
+      />
 
-            <h1 className="mt-1 text-xl font-bold">
-              VMC-01
-            </h1>
-          </div>
+      <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
 
-          <div className="flex items-center gap-2 rounded-full bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-400">
-            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
-            POWER ON
-          </div>
-        </div>
-      </header>
+        {/* -------------------------------------------
+            ERROR MESSAGE
+        ------------------------------------------- */}
 
-      {/* PROGRESS */}
-      <section className="border-b border-slate-200 bg-white">
-        <div className="mx-auto max-w-6xl px-5 py-4">
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-semibold text-slate-700">
-              {setup.stage === "checks"
-                ? "Machine Checks"
-                : setup.stage === "tools"
-                  ? "Required Tools"
-                  : setup.stage === "workpiece"
-                    ? "Workpiece Setup"
-                    : setup.stage === "ready"
-                      ? "Ready Review"
-                      : "Operation"}
-            </p>
-
-            <p className="text-sm font-medium text-slate-500">
-              {setup.stage === "checks"
-                ? `${currentCheck + 1} of ${machineChecks.length}`
-                : setup.stage === "tools"
-                  ? `${currentTool + 1} of ${tools.length}`
-                  : setup.stage === "workpiece"
-                    ? "Complete"
-                    : setup.stage === "ready"
-                      ? "Final Review"
-                      : setup.operationStatus}
-            </p>
-          </div>
-
-          <div className="mt-3 flex gap-2">
-            <div
-              className={`h-2 flex-1 rounded-full ${
-                allChecksConfirmed
-                  ? "bg-emerald-500"
-                  : setup.stage === "checks"
-                    ? "bg-blue-600"
-                    : "bg-slate-200"
-              }`}
-            />
-
-            <div
-              className={`h-2 flex-1 rounded-full ${
-                allToolsConfirmed
-                  ? "bg-emerald-500"
-                  : setup.stage === "tools"
-                    ? "bg-blue-600"
-                    : "bg-slate-200"
-              }`}
-            />
-
-            <div
-              className={`h-2 flex-1 rounded-full ${
-                setup.workpieceConfirmed
-                  ? "bg-emerald-500"
-                  : setup.stage === "workpiece"
-                    ? "bg-blue-600"
-                    : "bg-slate-200"
-              }`}
-            />
-
-            <div
-              className={`h-2 flex-1 rounded-full ${
-                setup.stage === "ready" ||
-                setup.stage === "operation"
-                  ? "bg-emerald-500"
-                  : "bg-slate-200"
-              }`}
-            />
-          </div>
-        </div>
-      </section>
-
-      {/* ERROR */}
-      {error && (
-        <div className="mx-auto max-w-4xl px-5 pt-5">
-          <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-center font-semibold text-red-700">
+        {error && (
+          <div
+            role="alert"
+            className="mb-6 rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-red-700"
+          >
             {error}
           </div>
-        </div>
-      )}
-      {/* MACHINE STATUS */}
-      <div className="mx-auto max-w-4xl px-5 pt-6">
-        <MachineStatus status={setup.operationStatus} />
-      </div>
+        )}
 
-      {/* MAIN */}
-      <section className="mx-auto flex min-h-[calc(100vh-150px)] max-w-4xl items-center px-5 py-10">
-        <div className="w-full rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-10">
+        {/* -------------------------------------------
+            PROGRESS HEADER
+        ------------------------------------------- */}
 
-          {/* MACHINE CHECKS */}
-          {setup.stage === "checks" && (
-            <div className="text-center">
-              <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-600">
-                Machine Check
+        <div className="mb-8">
+          <div className="mb-3 flex items-end justify-between gap-4">
+
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">
+                {stageTitle}
               </p>
 
-              <div className="mx-auto mt-6 flex h-20 w-20 items-center justify-center rounded-full bg-blue-50 text-3xl font-bold text-blue-600">
-                {currentCheck + 1}
+              <h2 className="mt-1 text-2xl font-bold text-slate-900">
+                {stageSubtitle}
+              </h2>
+            </div>
+
+            <button
+              type="button"
+              onClick={resetSetup}
+              disabled={actionLoading}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              RESET
+            </button>
+
+          </div>
+
+          <ProgressBar
+            progress={progress}
+          />
+        </div>
+
+        {/* -------------------------------------------
+            MACHINE STATUS
+        ------------------------------------------- */}
+
+        <MachineStatus
+          operationStatus={
+            setup.operationStatus
+          }
+        />
+
+        {/* -------------------------------------------
+            MACHINE CHECKS
+        ------------------------------------------- */}
+
+        {setup.stage === "checks" && (
+          <MachineChecks
+            checks={machineChecks}
+            currentCheck={currentCheck}
+            confirmed={checkConfirmed}
+            loading={actionLoading}
+            onConfirm={confirmCheck}
+            onNext={nextCheck}
+          />
+        )}
+
+        {/* -------------------------------------------
+            TOOL SETUP
+        ------------------------------------------- */}
+
+        {setup.stage === "tools" && (
+          <ToolSetup
+            tools={tools}
+            currentTool={currentTool}
+            confirmed={toolConfirmed}
+            loading={actionLoading}
+            onConfirm={confirmTool}
+            onNext={nextTool}
+          />
+        )}
+
+        {/* -------------------------------------------
+            WORKPIECE SETUP
+        ------------------------------------------- */}
+
+        {setup.stage ===
+          "workpiece" && (
+          <section className="mt-8 rounded-2xl bg-white p-6 shadow-sm sm:p-10">
+
+            <div className="text-center">
+
+              <p className="text-sm font-medium uppercase tracking-wide text-slate-500">
+                Workpiece Setup
+              </p>
+
+              <div className="mx-auto mt-6 flex h-20 w-20 items-center justify-center rounded-full bg-amber-50 text-3xl">
+                WP
               </div>
 
-              <h2 className="mt-6 text-2xl font-bold sm:text-3xl">
-                {currentCheckItem.title}
+              <h2 className="mt-6 text-2xl font-bold text-slate-900 sm:text-3xl">
+                Aluminum Housing
               </h2>
 
               <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-slate-600 sm:text-lg">
-                {currentCheckItem.description}
+                Confirm that the AL
+                6061-T6 workpiece is
+                correctly positioned,
+                clamped, and aligned
+                with work offset G54.
               </p>
 
-              <div className="mt-8">
-                {checkConfirmed ? (
-                  <div className="inline-flex rounded-lg bg-emerald-50 px-5 py-3 font-bold text-emerald-700">
-                    ✓ CHECK CONFIRMED
-                  </div>
-                ) : (
-                  <div className="inline-flex rounded-lg bg-amber-50 px-5 py-3 font-bold text-amber-700">
-                    ● ACTION REQUIRED
-                  </div>
-                )}
-              </div>
-
-              <div className="mx-auto mt-10 flex max-w-md flex-col gap-3">
-                <button
-                  onClick={confirmCheck}
-                  disabled={checkConfirmed || actionLoading}
-                  className={`min-h-14 rounded-xl px-6 text-base font-bold ${
-                    checkConfirmed || actionLoading
-                      ? "cursor-not-allowed bg-slate-200 text-slate-500"
-                      : "bg-blue-600 text-white hover:bg-blue-700"
-                  }`}
-                >
-                  {checkConfirmed
-                    ? "✓ CHECK CONFIRMED"
-                    : actionLoading
-                      ? "CONFIRMING..."
-                      : "CONFIRM CHECK"}
-                </button>
-
-                <button
-                  onClick={nextCheck}
-                  disabled={!checkConfirmed || actionLoading}
-                  className={`min-h-14 rounded-xl border px-6 text-base font-bold ${
-                    checkConfirmed && !actionLoading
-                      ? "border-slate-300 bg-white text-slate-900 hover:bg-slate-50"
-                      : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-                  }`}
-                >
-                  {currentCheck < machineChecks.length - 1
-                    ? "NEXT CHECK →"
-                    : "CONTINUE TO TOOLS →"}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* TOOLS */}
-          {setup.stage === "tools" && (
-            <div className="text-center">
-              <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-600">
-                Required Tool
-              </p>
-
-              <div className="mx-auto mt-6 flex h-20 w-20 items-center justify-center rounded-full bg-blue-50 text-2xl font-bold text-blue-600">
-                {currentToolItem.number}
-              </div>
-
-              <h2 className="mt-6 text-2xl font-bold sm:text-3xl">
-                {currentToolItem.type}
-              </h2>
-
-              <p className="mt-3 text-lg font-semibold text-slate-700">
-                Purpose: {currentToolItem.purpose}
-              </p>
-
-              <div className="mx-auto mt-6 max-w-lg rounded-xl border border-slate-200 bg-slate-50 p-5 text-left">
-                <div className="flex justify-between border-b border-slate-200 pb-3">
-                  <span className="text-slate-500">
-                    Tool Number
-                  </span>
-
-                  <span className="font-bold">
-                    {currentToolItem.number}
-                  </span>
-                </div>
-
-                <div className="flex justify-between border-b border-slate-200 py-3">
-                  <span className="text-slate-500">
-                    Tool Type
-                  </span>
-
-                  <span className="font-bold">
-                    {currentToolItem.type}
-                  </span>
-                </div>
-
-                <div className="flex justify-between pt-3">
-                  <span className="text-slate-500">
-                    CNC Program
-                  </span>
-
-                  <span className="font-bold">
-                    OPR-2048 Rev 3
-                  </span>
-                </div>
-              </div>
-
-              <div className="mt-8">
-                {toolConfirmed ? (
-                  <div className="inline-flex rounded-lg bg-emerald-50 px-5 py-3 font-bold text-emerald-700">
-                    ✓ TOOL CONFIRMED
-                  </div>
-                ) : (
-                  <div className="inline-flex rounded-lg bg-amber-50 px-5 py-3 font-bold text-amber-700">
-                    ● INSERT TOOL
-                  </div>
-                )}
-              </div>
-
-              <div className="mx-auto mt-10 flex max-w-md flex-col gap-3">
-                <button
-                  onClick={confirmTool}
-                  disabled={toolConfirmed || actionLoading}
-                  className={`min-h-14 rounded-xl px-6 text-base font-bold ${
-                    toolConfirmed || actionLoading
-                      ? "cursor-not-allowed bg-slate-200 text-slate-500"
-                      : "bg-blue-600 text-white hover:bg-blue-700"
-                  }`}
-                >
-                  {toolConfirmed
-                    ? "✓ TOOL CONFIRMED"
-                    : actionLoading
-                      ? "CONFIRMING..."
-                      : "INSERT & CONFIRM TOOL"}
-                </button>
-
-                <button
-                  onClick={nextTool}
-                  disabled={!toolConfirmed || actionLoading}
-                  className={`min-h-14 rounded-xl border px-6 text-base font-bold ${
-                    toolConfirmed && !actionLoading
-                      ? "border-slate-300 bg-white text-slate-900 hover:bg-slate-50"
-                      : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-                  }`}
-                >
-                  {currentTool < tools.length - 1
-                    ? "NEXT TOOL →"
-                    : "CONTINUE TO WORKPIECE →"}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* WORKPIECE */}
-          {setup.stage === "workpiece" && (
-            <div>
-              <div className="text-center">
-                <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-600">
-                  Workpiece Setup
-                </p>
-
-                <div className="mx-auto mt-6 flex h-20 w-20 items-center justify-center rounded-full bg-blue-50 text-3xl">
-                  🔩
-                </div>
-
-                <h2 className="mt-6 text-2xl font-bold sm:text-3xl">
-                  {workpiece.name}
-                </h2>
-
-                <p className="mt-3 text-slate-600">
-                  Arrange, orient and clamp the workpiece as specified.
-                </p>
-              </div>
-
-              <div className="mx-auto mt-8 max-w-2xl overflow-hidden rounded-xl border border-slate-200">
-                <div className="grid grid-cols-1 sm:grid-cols-2">
-                  <div className="border-b border-slate-200 p-4 sm:border-r">
-                    <p className="text-sm text-slate-500">
-                      Material
-                    </p>
-
-                    <p className="mt-1 font-bold">
-                      {workpiece.material}
-                    </p>
-                  </div>
-
-                  <div className="border-b border-slate-200 p-4">
-                    <p className="text-sm text-slate-500">
-                      Drawing
-                    </p>
-
-                    <p className="mt-1 font-bold">
-                      {workpiece.drawing} {workpiece.revision}
-                    </p>
-                  </div>
-
-                  <div className="border-b border-slate-200 p-4 sm:border-r">
-                    <p className="text-sm text-slate-500">
-                      Fixture
-                    </p>
-
-                    <p className="mt-1 font-bold">
-                      {workpiece.fixture}
-                    </p>
-                  </div>
-
-                  <div className="border-b border-slate-200 p-4">
-                    <p className="text-sm text-slate-500">
-                      Work Offset
-                    </p>
-
-                    <p className="mt-1 font-bold">
-                      {workpiece.workOffset}
-                    </p>
-                  </div>
-
-                  <div className="border-b border-slate-200 p-4 sm:col-span-2">
-                    <p className="text-sm text-slate-500">
-                      Orientation
-                    </p>
-
-                    <p className="mt-1 font-bold">
-                      {workpiece.orientation}
-                    </p>
-                  </div>
-
-                  <div className="p-4 sm:col-span-2">
-                    <p className="text-sm text-slate-500">
-                      Clamping Instruction
-                    </p>
-
-                    <p className="mt-1 font-bold leading-6">
-                      {workpiece.clamping}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-8 text-center">
-                {setup.workpieceConfirmed ? (
-                  <div className="inline-flex rounded-lg bg-emerald-50 px-5 py-3 font-bold text-emerald-700">
-                    ✓ WORKPIECE SETUP CONFIRMED
-                  </div>
-                ) : (
-                  <div className="inline-flex rounded-lg bg-amber-50 px-5 py-3 font-bold text-amber-700">
-                    ● SETUP REQUIRED
-                  </div>
-                )}
-              </div>
-
-              <div className="mx-auto mt-8 max-w-md">
-                <button
-                  onClick={confirmWorkpiece}
-                  disabled={
-                    setup.workpieceConfirmed ||
-                    actionLoading
-                  }
-                  className={`min-h-14 w-full rounded-xl px-6 text-base font-bold ${
-                    setup.workpieceConfirmed ||
-                    actionLoading
-                      ? "cursor-not-allowed bg-slate-200 text-slate-500"
-                      : "bg-blue-600 text-white hover:bg-blue-700"
-                  }`}
-                >
-                  {setup.workpieceConfirmed
-                    ? "✓ SETUP CONFIRMED"
-                    : actionLoading
-                      ? "CONFIRMING..."
-                      : "CONFIRM WORKPIECE SETUP"}
-                </button>
-              </div>
-
-              {setup.workpieceConfirmed && (
-                <div className="mx-auto mt-4 max-w-md">
-                  <button
-                    onClick={proceedToOperation}
-                    disabled={actionLoading}
-                    className="min-h-14 w-full rounded-xl border border-slate-300 bg-white px-6 text-base font-bold text-slate-900 hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
-                  >
-                    PROCEED TO READY REVIEW →
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* READY REVIEW */}
-          {setup.stage === "ready" && (
-            <div>
-              <div className="text-center">
-                <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-600">
-                  Final Readiness Review
-                </p>
-
-                <div className="mx-auto mt-6 flex h-24 w-24 items-center justify-center rounded-full bg-emerald-100 text-4xl text-emerald-600">
-                  ✓
-                </div>
-
-                <h2 className="mt-6 text-3xl font-bold sm:text-4xl">
-                  READY
-                </h2>
-
-                <p className="mt-3 text-slate-600">
-                  All required machine, tooling and workpiece arrangements
-                  are complete.
-                </p>
-              </div>
-
-              <div className="mt-10 space-y-3">
-                <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-                  <span className="font-semibold">
-                    Machine Checks
-                  </span>
-
-                  <span className="font-bold text-emerald-700">
-                    ✓ COMPLETE
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-                  <span className="font-semibold">
-                    Required Tools
-                  </span>
-
-                  <span className="font-bold text-emerald-700">
-                    ✓ COMPLETE
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-                  <span className="font-semibold">
-                    Workpiece Setup
-                  </span>
-
-                  <span className="font-bold text-emerald-700">
-                    ✓ COMPLETE
-                  </span>
-                </div>
-              </div>
-
-              <div className="mt-8 rounded-xl border border-slate-200 bg-slate-50 p-5">
-                <h3 className="font-bold">
-                  Operation Details
-                </h3>
-
-                <div className="mt-4 space-y-3 text-sm">
-                  <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">
-                      Machine
-                    </span>
-
-                    <span className="font-bold">
-                      VMC-01
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">
-                      Operation
-                    </span>
-
-                    <span className="text-right font-bold">
-                      Aluminum Housing Roughing
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">
-                      CNC Program
-                    </span>
-
-                    <span className="font-bold">
-                      OPR-2048 Rev 3
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">
-                      Material
-                    </span>
-
-                    <span className="font-bold">
-                      AL 6061-T6
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">
-                      Drawing
-                    </span>
-
-                    <span className="font-bold">
-                      DWG-2048 Rev C
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">
-                      Fixture
-                    </span>
-
-                    <span className="text-right font-bold">
-                      4-jaw hydraulic fixture
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">
-                      Work Offset
-                    </span>
-
-                    <span className="font-bold">
-                      G54
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mx-auto mt-10 max-w-md">
-                <button
-                  onClick={proceedToOperation}
-                  disabled={actionLoading}
-                  className="min-h-16 w-full rounded-xl bg-emerald-600 px-6 text-lg font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {actionLoading
-                    ? "OPENING OPERATION..."
-                    : "PROCEED TO OPERATION →"}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* OPERATION */}
-          {setup.stage === "operation" && (
-            <div className="text-center">
-              <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-600">
-                VMC Operation
-              </p>
-
-              <h2 className="mt-6 text-3xl font-bold sm:text-4xl">
-                Aluminum Housing Roughing
-              </h2>
-
-              <div
-                className={`mx-auto mt-8 inline-flex rounded-full px-6 py-3 text-lg font-bold ${
-                  setup.operationStatus === "RUNNING"
-                    ? "bg-blue-100 text-blue-700"
-                    : setup.operationStatus === "STOPPED"
-                      ? "bg-red-100 text-red-700"
-                      : "bg-emerald-100 text-emerald-700"
-                }`}
-              >
-                {setup.operationStatus}
-              </div>
-
-              <div className="mx-auto mt-10 max-w-lg rounded-xl border border-slate-200 bg-slate-50 p-5 text-left">
-                <div className="flex justify-between border-b border-slate-200 pb-3">
-                  <span className="text-slate-500">
-                    Machine
-                  </span>
-
-                  <span className="font-bold">
-                    VMC-01
-                  </span>
-                </div>
-
-                <div className="flex justify-between border-b border-slate-200 py-3">
-                  <span className="text-slate-500">
-                    Operation
-                  </span>
-
-                  <span className="text-right font-bold">
-                    Aluminum Housing Roughing
-                  </span>
-                </div>
-
-                <div className="flex justify-between border-b border-slate-200 py-3">
-                  <span className="text-slate-500">
-                    CNC Program
-                  </span>
-
-                  <span className="font-bold">
-                    OPR-2048 Rev 3
-                  </span>
-                </div>
-
-                <div className="flex justify-between border-b border-slate-200 py-3">
-                  <span className="text-slate-500">
+              <div className="mx-auto mt-8 grid max-w-2xl gap-4 text-left sm:grid-cols-3">
+
+                {/* Material */}
+                <div className="rounded-xl bg-slate-50 p-4">
+                  <p className="text-xs font-semibold uppercase text-slate-500">
                     Material
-                  </span>
+                  </p>
 
-                  <span className="font-bold">
+                  <p className="mt-1 font-bold text-slate-900">
                     AL 6061-T6
-                  </span>
+                  </p>
                 </div>
 
-                <div className="flex justify-between pt-3">
-                  <span className="text-slate-500">
+                {/* Work Offset */}
+                <div className="rounded-xl bg-slate-50 p-4">
+                  <p className="text-xs font-semibold uppercase text-slate-500">
                     Work Offset
-                  </span>
+                  </p>
 
-                  <span className="font-bold">
+                  <p className="mt-1 font-bold text-slate-900">
                     G54
-                  </span>
+                  </p>
                 </div>
+
+                {/* Machine */}
+                <div className="rounded-xl bg-slate-50 p-4">
+                  <p className="text-xs font-semibold uppercase text-slate-500">
+                    Machine
+                  </p>
+
+                  <p className="mt-1 font-bold text-slate-900">
+                    VMC-01
+                  </p>
+                </div>
+
               </div>
 
-              <div className="mt-8">
-                {setup.operationStatus === "RUNNING" && (
-                  <p className="mb-5 font-semibold text-blue-700">
-                    Operation is currently running.
-                  </p>
-                )}
+              <button
+                type="button"
+                onClick={
+                  confirmWorkpiece
+                }
+                disabled={
+                  setup.workpieceConfirmed ||
+                  actionLoading
+                }
+                className="mt-8 min-h-14 rounded-xl bg-blue-600 px-8 text-base font-bold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+              >
+                {setup.workpieceConfirmed
+                  ? "WORKPIECE CONFIRMED"
+                  : actionLoading
+                  ? "PROCESSING..."
+                  : "CONFIRM WORKPIECE SETUP"}
+              </button>
 
-                {setup.operationStatus === "STOPPED" && (
-                  <p className="mb-5 font-semibold text-red-700">
-                    Operation stopped. The latest stage has been preserved.
-                  </p>
-                )}
-
-                {setup.operationStatus === "READY" && (
-                  <p className="mb-5 font-semibold text-emerald-700">
-                    Machine is ready to start the operation.
-                  </p>
-                )}
-
-                <div className="mx-auto flex max-w-md flex-col gap-3">
-                  {setup.operationStatus !== "RUNNING" && (
-                    <button
-                      onClick={startOperation}
-                      disabled={actionLoading}
-                      className="min-h-16 w-full rounded-xl bg-emerald-600 px-6 text-lg font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {actionLoading
-                        ? "STARTING..."
-                        : "START OPERATION"}
-                    </button>
-                  )}
-
-                  {setup.operationStatus === "RUNNING" && (
-                    <button
-                      onClick={stopOperation}
-                      disabled={actionLoading}
-                      className="min-h-16 w-full rounded-xl bg-red-600 px-6 text-lg font-bold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {actionLoading
-                        ? "STOPPING..."
-                        : "STOP OPERATION"}
-                    </button>
-                  )}
-                </div>
-              </div>
             </div>
-          )}
-        </div>
-      </section>
+          </section>
+        )}
 
-      {/* FOOTER */}
-      <footer className="border-t border-slate-200 bg-white">
-        <div className="mx-auto max-w-6xl overflow-x-auto px-5 py-4">
-          <div className="flex min-w-max items-center justify-center gap-3 text-sm font-semibold">
+        {/* -------------------------------------------
+            READY REVIEW
+        ------------------------------------------- */}
+
+        {setup.stage === "ready" && (
+          <section className="mt-8 rounded-2xl bg-white p-6 shadow-sm sm:p-10">
+
+            <div className="text-center">
+
+              <p className="text-sm font-medium uppercase tracking-wide text-slate-500">
+                Final Review
+              </p>
+
+              <h2 className="mt-4 text-3xl font-bold text-slate-900">
+                Machine Ready
+              </h2>
+
+              <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-slate-600">
+                All machine checks,
+                tools, and workpiece
+                setup have been
+                completed. Review the
+                operation details before
+                opening the operation
+                screen.
+              </p>
+
+              <div className="mx-auto mt-8 max-w-2xl rounded-2xl bg-slate-50 p-6 text-left">
+
+                <div className="grid gap-5 sm:grid-cols-2">
+
+                  {/* Machine */}
+                  <div>
+                    <p className="text-xs font-semibold uppercase text-slate-500">
+                      Machine
+                    </p>
+
+                    <p className="mt-1 font-bold text-slate-900">
+                      VMC-01
+                    </p>
+                  </div>
+
+                  {/* Operation */}
+                  <div>
+                    <p className="text-xs font-semibold uppercase text-slate-500">
+                      Operation
+                    </p>
+
+                    <p className="mt-1 font-bold text-slate-900">
+                      Aluminum Housing
+                      Roughing
+                    </p>
+                  </div>
+
+                  {/* CNC Program */}
+                  <div>
+                    <p className="text-xs font-semibold uppercase text-slate-500">
+                      CNC Program
+                    </p>
+
+                    <p className="mt-1 font-bold text-slate-900">
+                      OPR-2048 Rev 3
+                    </p>
+                  </div>
+
+                  {/* Material */}
+                  <div>
+                    <p className="text-xs font-semibold uppercase text-slate-500">
+                      Material
+                    </p>
+
+                    <p className="mt-1 font-bold text-slate-900">
+                      AL 6061-T6
+                    </p>
+                  </div>
+
+                  {/* Work Offset */}
+                  <div>
+                    <p className="text-xs font-semibold uppercase text-slate-500">
+                      Work Offset
+                    </p>
+
+                    <p className="mt-1 font-bold text-slate-900">
+                      G54
+                    </p>
+                  </div>
+
+                  {/* Machine Status */}
+                  <div>
+                    <p className="text-xs font-semibold uppercase text-slate-500">
+                      Machine Status
+                    </p>
+
+                    <p className="mt-1 font-bold text-emerald-600">
+                      READY
+                    </p>
+                  </div>
+
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={
+                  proceedOperation
+                }
+                disabled={actionLoading}
+                className="mt-8 min-h-14 rounded-xl bg-blue-600 px-8 text-base font-bold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {actionLoading
+                  ? "OPENING..."
+                  : "PROCEED TO OPERATION"}
+              </button>
+
+            </div>
+          </section>
+        )}
+
+        {/* -------------------------------------------
+            OPERATION
+        ------------------------------------------- */}
+
+        {setup.stage ===
+          "operation" && (
+          <OperationPanel
+            operationStatus={
+              setup.operationStatus
+            }
+            operationProgress={
+              setup.operationProgress
+            }
+            operationElapsedSeconds={
+              setup.operationElapsedSeconds
+            }
+            loading={actionLoading}
+            onStart={startOperation}
+            onStop={stopOperation}
+          />
+        )}
+
+        {/* -------------------------------------------
+            STAGE NAVIGATION
+        ------------------------------------------- */}
+
+        <div className="mt-8 rounded-xl border border-slate-200 bg-white p-4">
+
+          <div className="flex flex-wrap items-center justify-center gap-2 text-xs font-bold uppercase tracking-wide">
+
+            {/* Machine Checks */}
             <span
               className={
-                allChecksConfirmed
-                  ? "text-emerald-600"
-                  : setup.stage === "checks"
-                    ? "rounded-full bg-blue-600 px-4 py-2 text-white"
-                    : "text-slate-400"
-              }
-            >
-              {allChecksConfirmed
-                ? "✓ MACHINE CHECKS"
-                : "MACHINE CHECKS"}
-            </span>
-
-            <span className="text-slate-300">
-              →
-            </span>
-
-            <span
-              className={
-                allToolsConfirmed
-                  ? "text-emerald-600"
-                  : setup.stage === "tools"
-                    ? "rounded-full bg-blue-600 px-4 py-2 text-white"
-                    : "text-slate-400"
-              }
-            >
-              {allToolsConfirmed
-                ? "✓ TOOLS"
-                : "TOOLS"}
-            </span>
-
-            <span className="text-slate-300">
-              →
-            </span>
-
-            <span
-              className={
-                setup.workpieceConfirmed
-                  ? "text-emerald-600"
-                  : setup.stage === "workpiece"
-                    ? "rounded-full bg-blue-600 px-4 py-2 text-white"
-                    : "text-slate-400"
-              }
-            >
-              {setup.workpieceConfirmed
-                ? "✓ WORKPIECE"
-                : "WORKPIECE"}
-            </span>
-
-            <span className="text-slate-300">
-              →
-            </span>
-
-            <span
-              className={
-                setup.stage === "ready" ||
-                setup.stage === "operation"
-                  ? "rounded-full bg-emerald-600 px-4 py-2 text-white"
+                setup.stage === "checks"
+                  ? "text-blue-600"
                   : "text-slate-400"
               }
             >
-              {setup.stage === "ready" ||
-              setup.stage === "operation"
-                ? "✓ READY"
-                : "READY"}
+              MACHINE CHECKS
             </span>
 
             <span className="text-slate-300">
               →
             </span>
 
+            {/* Tools */}
             <span
               className={
-                setup.stage === "operation"
-                  ? "rounded-full bg-blue-600 px-4 py-2 text-white"
+                setup.stage === "tools"
+                  ? "text-blue-600"
+                  : "text-slate-400"
+              }
+            >
+              TOOLS
+            </span>
+
+            <span className="text-slate-300">
+              →
+            </span>
+
+            {/* Workpiece */}
+            <span
+              className={
+                setup.stage ===
+                "workpiece"
+                  ? "text-blue-600"
+                  : "text-slate-400"
+              }
+            >
+              WORKPIECE
+            </span>
+
+            <span className="text-slate-300">
+              →
+            </span>
+
+            {/* Ready */}
+            <span
+              className={
+                setup.stage === "ready"
+                  ? "text-blue-600"
+                  : "text-slate-400"
+              }
+            >
+              READY
+            </span>
+
+            <span className="text-slate-300">
+              →
+            </span>
+
+            {/* Operation */}
+            <span
+              className={
+                setup.stage ===
+                "operation"
+                  ? "text-blue-600"
                   : "text-slate-400"
               }
             >
               OPERATION
             </span>
+
           </div>
         </div>
-      </footer>
+
+        {/* -------------------------------------------
+            SUMMARY
+        ------------------------------------------- */}
+
+        <div className="mt-6 text-center text-sm font-medium text-slate-500">
+          Checks:{" "}
+          {checksCompleted}/
+          {machineChecks.length}
+
+          {" · "}
+
+          Tools:{" "}
+          {toolsCompleted}/
+          {tools.length}
+
+          {" · "}
+
+          Workpiece:{" "}
+          {setup.workpieceConfirmed
+            ? "CONFIRMED"
+            : "PENDING"}
+        </div>
+
+      </div>
     </main>
   );
 }

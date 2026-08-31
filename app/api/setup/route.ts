@@ -1,4 +1,4 @@
-export const runtime = "nodejs";
+﻿export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
@@ -19,6 +19,8 @@ type SetupState = {
   workpieceConfirmed: boolean;
   stage: Stage;
   operationStatus: OperationStatus;
+  operationProgress: number;
+  operationElapsedSeconds: number;
 };
 
 function getSetupState(): SetupState {
@@ -31,6 +33,8 @@ function getSetupState(): SetupState {
       workpiece_confirmed: number;
       stage: Stage;
       operation_status: OperationStatus;
+      operation_progress: number;
+      operation_elapsed_seconds: number;
     };
 
   return {
@@ -39,6 +43,8 @@ function getSetupState(): SetupState {
     workpieceConfirmed: Boolean(row.workpiece_confirmed),
     stage: row.stage,
     operationStatus: row.operation_status,
+    operationProgress: row.operation_progress,
+    operationElapsedSeconds: row.operation_elapsed_seconds,
   };
 }
 
@@ -50,14 +56,18 @@ function saveSetupState(state: SetupState) {
       tools = ?,
       workpiece_confirmed = ?,
       stage = ?,
-      operation_status = ?
+      operation_status = ?,
+      operation_progress = ?,
+      operation_elapsed_seconds = ?
     WHERE id = 1
   `).run(
     JSON.stringify(state.machineChecks),
     JSON.stringify(state.tools),
     state.workpieceConfirmed ? 1 : 0,
     state.stage,
-    state.operationStatus
+    state.operationStatus,
+    state.operationProgress,
+    state.operationElapsedSeconds
   );
 }
 
@@ -81,6 +91,8 @@ export async function POST(request: Request) {
         workpieceConfirmed: false,
         stage: "checks",
         operationStatus: "READY",
+        operationProgress: 0,
+        operationElapsedSeconds: 0,
       };
 
       saveSetupState(resetState);
@@ -215,6 +227,12 @@ export async function POST(request: Request) {
       }
 
       setupState.stage = "operation";
+
+      if (setupState.operationProgress >= 100) {
+        setupState.operationProgress = 0;
+        setupState.operationElapsedSeconds = 0;
+      }
+
       setupState.operationStatus = "READY";
 
       saveSetupState(setupState);
@@ -251,6 +269,11 @@ export async function POST(request: Request) {
         );
       }
 
+      if (setupState.operationProgress >= 100) {
+        setupState.operationProgress = 0;
+        setupState.operationElapsedSeconds = 0;
+      }
+
       setupState.operationStatus = "RUNNING";
 
       saveSetupState(setupState);
@@ -258,6 +281,57 @@ export async function POST(request: Request) {
       return NextResponse.json({
         success: true,
         message: "Operation started",
+        data: setupState,
+      });
+    }
+
+    if (body.action === "update-operation") {
+      if (setupState.stage !== "operation") {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Operation stage has not been opened",
+          },
+          { status: 400 }
+        );
+      }
+
+      const progress = Number(body.progress);
+      const elapsedSeconds = Number(body.elapsedSeconds);
+
+      if (
+        !Number.isFinite(progress) ||
+        !Number.isFinite(elapsedSeconds)
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Invalid operation progress",
+          },
+          { status: 400 }
+        );
+      }
+
+      setupState.operationProgress = Math.min(
+        100,
+        Math.max(0, Math.round(progress))
+      );
+
+      setupState.operationElapsedSeconds = Math.max(
+        0,
+        Math.round(elapsedSeconds)
+      );
+
+      if (setupState.operationProgress >= 100) {
+        setupState.operationProgress = 100;
+        setupState.operationStatus = "STOPPED";
+      }
+
+      saveSetupState(setupState);
+
+      return NextResponse.json({
+        success: true,
+        message: "Operation progress updated",
         data: setupState,
       });
     }
@@ -270,6 +344,23 @@ export async function POST(request: Request) {
             message: "Operation stage has not been opened",
           },
           { status: 400 }
+        );
+      }
+
+      const progress = Number(body.progress);
+      const elapsedSeconds = Number(body.elapsedSeconds);
+
+      if (Number.isFinite(progress)) {
+        setupState.operationProgress = Math.min(
+          100,
+          Math.max(0, Math.round(progress))
+        );
+      }
+
+      if (Number.isFinite(elapsedSeconds)) {
+        setupState.operationElapsedSeconds = Math.max(
+          0,
+          Math.round(elapsedSeconds)
         );
       }
 
